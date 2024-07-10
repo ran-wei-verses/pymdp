@@ -596,9 +596,10 @@ class Agent(Module):
                 assert (
                     self.pB[f].shape[2:-1] == factor_dims
                 ), f"Please input a `B_dependencies` whose {f}-th indices pick out the hidden state factors that line up with the all-but-final lagging dimensions of pB[{f}]..."
-            assert max(self.B_dependencies[f]) <= (
-                self.num_factors - 1
-            ), f"Check factor {f} of `B_dependencies` - must be consistent with `num_states` and `num_factors`..."
+            if len(self.B_dependencies[f]) != 0:
+                assert max(self.B_dependencies[f]) <= (
+                    self.num_factors - 1
+                ), f"Check factor {f} of `B_dependencies` - must be consistent with `num_states` and `num_factors`..."
 
         for factor_idx in self.control_fac_idx:
             assert (

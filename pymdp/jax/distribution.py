@@ -131,9 +131,9 @@ def compile_model(config):
     state_dependencies = dict()
     control_dependencies = dict()
     likelihood_dependencies = dict()
-    transition_events = dict()
-    likelihood_events = dict()
-    labels = dict()
+    transition_events = dict() # state variables names and elements
+    likelihood_events = dict() # observation variables names and elements
+    labels = dict() # all variable names and elements
     shape = dict()
     for mod in config:
         for k, v in config[mod].items():
@@ -148,8 +148,7 @@ def compile_model(config):
                     case "depends_on":
                         if mod == "states":
                             state_dependencies[k] = [name for name in v[keyword]]
-                            if k in v[keyword]:
-                                transition_events[k] = labels[k]
+                            transition_events[k] = labels[k]
                         else:
                             likelihood_dependencies[k] = [name for name in v[keyword]]
                             likelihood_events[k] = labels[k]
@@ -201,9 +200,9 @@ if __name__ == "__main__":
 
     data = np.zeros((len(locations), len(locations), len(controls)))
     transition = Distribution(
-        data,
         {"location": locations},
         {"location": locations, "control": controls},
+        data,
     )
 
     assert transition["A", "B", "up"] == 0.0
