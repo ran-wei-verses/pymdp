@@ -14,7 +14,7 @@ from jax import vmap, nn, random
 import jax.tree_util as jtu
 
 from pymdp import utils
-from pymdp.jax.agent import Agent
+from pymdp.jax.agent import Agent, CONTROL_ALGO_PARAMS
 from pymdp.jax.maths import compute_log_likelihood_single_modality
 from pymdp.jax.utils import norm_dist
 from equinox import Module
@@ -90,7 +90,52 @@ class TestAgentJax(unittest.TestCase):
         qs_hist = jtu.tree_map(lambda x: jnp.expand_dims(x, 0), agent.D)
 
         prior, _ = agent.infer_empirical_prior(action, qs_hist)
-        qs = agent.infer_states(observation, None, prior, None)
+        # qs = agent.infer_states(observation, None, prior, None)
+        qs = agent.infer_states(observation, prior)
+
+        q_pi, G = agent.infer_policies(qs)
+        action = agent.sample_action(q_pi)
+        action_multi = agent.decode_multi_actions(action)
+        action_reconstruct = agent.encode_multi_actions(action_multi)
+        
+        self.assertTrue(action_multi.shape[-1] == len(agent.num_controls))
+        self.assertTrue(jnp.allclose(action, action_reconstruct))
+
+    def test_agent_complex_action_mcts(self):
+        """
+        Test that an instance of the `Agent` class can be initialized and run with complex action dependency and mcts
+        """
+        np.random.seed(1)
+        num_obs = [5, 4, 4]
+        num_states = [2, 3, 1]
+        num_controls = [2, 3, 2]
+
+        A_factor_list = [[0], [0, 1], [0, 1, 2]]
+        B_factor_list = [[0], [0, 1], [1, 2]]
+        B_factor_control_list = [[], [0, 1], [0, 2]]
+        A = utils.random_A_matrix(num_obs, num_states, A_factor_list=A_factor_list)
+        B = utils.random_B_matrix(num_states, num_controls, B_factor_list=B_factor_list, B_factor_control_list=B_factor_control_list)
+        
+        control_algo_params = CONTROL_ALGO_PARAMS["mcts"]
+        agent = Agent(
+            A, B, 
+            A_dependencies=A_factor_list, 
+            B_dependencies=B_factor_list, 
+            B_action_dependencies=B_factor_control_list,
+            num_controls=num_controls,
+            sampling_mode="full",
+            control_algo="mcts",
+            control_algo_params=control_algo_params,
+        )
+
+        # dummy history
+        action = agent.policies[np.random.randint(0, len(agent.policies))]
+        observation = [np.random.randint(0, d, size=(1, 1)) for d in agent.num_obs]
+        qs_hist = jtu.tree_map(lambda x: jnp.expand_dims(x, 0), agent.D)
+
+        prior, _ = agent.infer_empirical_prior(action, qs_hist)
+        # qs = agent.infer_states(observation, None, prior, None)
+        qs = agent.infer_states(observation, prior)
 
         q_pi, G = agent.infer_policies(qs)
         action = agent.sample_action(q_pi)

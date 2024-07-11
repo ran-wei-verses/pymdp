@@ -20,6 +20,23 @@ from jaxtyping import Array
 from functools import partial
 
 
+INFERENCE_ALGO_PARAMS = {
+    "fpi": {
+        "num_iter": 16, 
+        "dF": 1.0, 
+        "dF_tol": 0.001
+    },
+}
+CONTROL_ALGO_PARAMS = {
+    "vanilla": {},
+    "mcts": {
+        "max_depth": 5, 
+        "num_simulations": 32,
+        "seed": 0,
+    },
+}
+
+
 class Agent(Module):
     """
     The Agent class, the highest-level API that wraps together processes for action, perception, and learning under active inference.
@@ -62,7 +79,6 @@ class Agent(Module):
     # mapping from multi action dependencies to flat action dependencies for each B
     action_maps: List[dict] = field(static=True)
     batch_size: int = field(static=True)
-    num_iter: int = field(static=True)
     num_obs: List[int] = field(static=True)
     num_modalities: int = field(static=True)
     num_states: List[int] = field(static=True)
@@ -93,6 +109,9 @@ class Agent(Module):
     sampling_mode: str = field(static=True)
     # fpi, vmp, mmp, ovf
     inference_algo: str = field(static=True)
+    inference_algo_params: dict = field(static=True)
+    control_algo: str = field(static=True)
+    control_algo_params: dict = field(static=True)
 
     learn_A: bool = field(static=True)
     learn_B: bool = field(static=True)
@@ -129,9 +148,11 @@ class Agent(Module):
         use_inductive=False,
         onehot_obs=False,
         action_selection="deterministic",
-        sampling_mode="marginal",
+        sampling_mode="full",
         inference_algo="fpi",
-        num_iter=16,
+        inference_algo_params=INFERENCE_ALGO_PARAMS["fpi"],
+        control_algo="vanilla",
+        control_algo_params=CONTROL_ALGO_PARAMS["vanilla"],
         apply_batch=True,
         learn_A=True,
         learn_B=True,
@@ -139,6 +160,7 @@ class Agent(Module):
         learn_D=True,
         learn_E=False,
     ):
+        assert control_algo in ["vanilla", "mcts"]
         if B_action_dependencies is not None:
             assert num_controls is not None, "Please specify num_controls for complex action dependencies"
 
@@ -178,12 +200,14 @@ class Agent(Module):
         self.num_controls = [B[f].shape[-1] for f in range(self.num_factors)]
 
         # static parameters
-        self.num_iter = num_iter
         self.inference_algo = inference_algo
+        self.inference_algo_params = inference_algo_params
+        self.control_algo = control_algo
+        self.control_algo_params = control_algo_params
         self.inductive_depth = inductive_depth
 
         # policy parameters
-        self.policy_len = policy_len
+        self.policy_len = policy_len if control_algo == "vanilla" else 1
         self.action_selection = action_selection
         self.sampling_mode = sampling_mode
         self.use_utility = use_utility
@@ -266,8 +290,66 @@ class Agent(Module):
         # validate model
         self._validate()
 
+    # @vmap
+    # def infer_states(self, observations, past_actions, empirical_prior, qs_hist, mask=None):
+    #     """
+    #     Update approximate posterior over hidden states by solving variational inference problem, given an observation.
+
+    #     Parameters
+    #     ----------
+    #     observations: ``list`` or ``tuple`` of ints
+    #         The observation input. Each entry ``observation[m]`` stores one-hot vectors representing the observations for modality ``m``.
+    #     past_actions: ``list`` or ``tuple`` of ints
+    #         The action input. Each entry ``past_actions[f]`` stores indices (or one-hots?) representing the actions for control factor ``f``.
+    #     empirical_prior: ``list`` or ``tuple`` of ``jax.numpy.ndarray`` of dtype object
+    #         Empirical prior beliefs over hidden states. Depending on the inference algorithm chosen, the resulting ``empirical_prior`` variable may be a matrix (or list of matrices)
+    #         of additional dimensions to encode extra conditioning variables like timepoint and policy.
+    #     Returns
+    #     ---------
+    #     qs: ``numpy.ndarray`` of dtype object
+    #         Posterior beliefs over hidden states. Depending on the inference algorithm chosen, the resulting ``qs`` variable will have additional sub-structure to reflect whether
+    #         beliefs are additionally conditioned on timepoint and policy.
+    #         For example, in case the ``self.inference_algo == 'MMP' `` indexing structure is policy->timepoint-->factor, so that
+    #         ``qs[p_idx][t_idx][f_idx]`` refers to beliefs about marginal factor ``f_idx`` expected under policy ``p_idx``
+    #         at timepoint ``t_idx``.
+    #     """
+
+    #     # TODO: infer this from shapes
+    #     if not self.onehot_obs:
+    #         o_vec = [nn.one_hot(o, self.num_obs[m]) for m, o in enumerate(observations)]
+    #     else:
+    #         o_vec = observations
+
+    #     A = self.A
+    #     if mask is not None:
+    #         for i, m in enumerate(mask):
+    #             o_vec[i] = m * o_vec[i] + (1 - m) * jnp.ones_like(o_vec[i]) / self.num_obs[i]
+    #             A[i] = m * A[i] + (1 - m) * jnp.ones_like(A[i]) / self.num_obs[i]
+
+    #     output = inference.update_posterior_states(
+    #         A,
+    #         self.B,
+    #         o_vec,
+    #         past_actions,
+    #         prior=empirical_prior,
+    #         qs_hist=qs_hist,
+    #         A_dependencies=self.A_dependencies,
+    #         B_dependencies=self.B_dependencies,
+    #         num_iter=self.inference_algo_params["num_iter"],
+    #         method=self.inference_algo,
+    #     )
+
+    #     return output
+
     @vmap
-    def infer_states(self, observations, past_actions, empirical_prior, qs_hist, mask=None):
+    def infer_states(
+        self,
+        observations,
+        empirical_prior,
+        past_actions=None,
+        qs_hist=None,
+        mask=None
+    ):
         """
         Update approximate posterior over hidden states by solving variational inference problem, given an observation.
 
@@ -311,14 +393,14 @@ class Agent(Module):
             qs_hist=qs_hist,
             A_dependencies=self.A_dependencies,
             B_dependencies=self.B_dependencies,
-            num_iter=self.num_iter,
+            num_iter=self.inference_algo_params["num_iter"],
             method=self.inference_algo,
         )
 
         return output
-
+    
     @vmap
-    def infer_policies(self, qs: List):
+    def infer_policies_inductive(self, qs: List):
         """
         Perform policy inference by optimizing a posterior (categorical) distribution over policies.
         This distribution is computed as the softmax of ``G * gamma + lnE`` where ``G`` is the negative expected
@@ -332,13 +414,9 @@ class Agent(Module):
         G: 1D ``numpy.ndarray``
             Negative expected free energies of each policy, i.e. a vector containing one negative expected free energy per policy.
         """
-
-        latest_belief = jtu.tree_map(
-            lambda x: x[-1], qs
-        )  # only get the posterior belief held at the current timepoint
         q_pi, G = control.update_posterior_policies_inductive(
             self.policies,
-            latest_belief,
+            qs,
             self.A,
             self.B,
             self.C,
@@ -355,6 +433,37 @@ class Agent(Module):
             use_param_info_gain=self.use_param_info_gain,
             use_inductive=self.use_inductive,
         )
+
+        return q_pi, G
+    
+    def infer_policies(self, qs: List):
+        """
+        Perform policy inference by optimizing a posterior (categorical) distribution over policies.
+        This distribution is computed as the softmax of ``G * gamma + lnE`` where ``G`` is the negative expected
+        free energy of policies, ``gamma`` is a policy precision and ``lnE`` is the (log) prior probability of policies.
+        This function returns the posterior over policies as well as the negative expected free energy of each policy.
+
+        Returns
+        ----------
+        q_pi: 1D ``numpy.ndarray``
+            Posterior beliefs over policies, i.e. a vector containing one posterior probability per policy.
+        G: 1D ``numpy.ndarray``
+            Negative expected free energies of each policy, i.e. a vector containing one negative expected free energy per policy.
+        """
+        latest_belief = jtu.tree_map(
+            lambda x: x[-1], qs
+        )  # only get the posterior belief held at the current timepoint
+        
+        if self.control_algo == "vanilla":
+            q_pi, G = self.infer_policies_inductive(latest_belief)
+        elif self.control_algo == "mcts":
+            q_pi, G = control.update_posterior_policies_mcts(
+                self,
+                latest_belief,
+                max_depth=self.control_algo_params["max_depth"], 
+                num_simulations=self.control_algo_params["num_simulations"], 
+                seed=self.control_algo_params["seed"], 
+            )
 
         return q_pi, G
 
@@ -555,23 +664,23 @@ class Agent(Module):
         policies_flat = jnp.stack(policies_flat, axis=-1)
         return policies_flat
 
-    def _get_default_params(self):
-        method = self.inference_algo
-        default_params = None
-        if method == "VANILLA":
-            default_params = {"num_iter": 8, "dF": 1.0, "dF_tol": 0.001}
-        elif method == "MMP":
-            raise NotImplementedError("MMP is not implemented")
-        elif method == "VMP":
-            raise NotImplementedError("VMP is not implemented")
-        elif method == "BP":
-            raise NotImplementedError("BP is not implemented")
-        elif method == "EP":
-            raise NotImplementedError("EP is not implemented")
-        elif method == "CV":
-            raise NotImplementedError("CV is not implemented")
+    # def _get_default_params(self):
+    #     method = self.inference_algo
+    #     default_params = None
+    #     if method == "VANILLA":
+    #         default_params = {"num_iter": 8, "dF": 1.0, "dF_tol": 0.001}
+    #     elif method == "MMP":
+    #         raise NotImplementedError("MMP is not implemented")
+    #     elif method == "VMP":
+    #         raise NotImplementedError("VMP is not implemented")
+    #     elif method == "BP":
+    #         raise NotImplementedError("BP is not implemented")
+    #     elif method == "EP":
+    #         raise NotImplementedError("EP is not implemented")
+    #     elif method == "CV":
+    #         raise NotImplementedError("CV is not implemented")
 
-        return default_params
+    #     return default_params
 
     def _validate(self):
         for m in range(self.num_modalities):

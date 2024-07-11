@@ -16,6 +16,7 @@ from jaxtyping import Array
 
 from pymdp.jax.maths import *
 # import pymdp.jax.utils as utils
+import mctx
 
 def get_marginals(q_pi, policies, num_controls):
     """
@@ -459,6 +460,94 @@ def calc_inductive_value_t(qs, qs_next, I, epsilon=1e-3):
         inductive_val += path_available * I_m.dot(qs_next[f]) # scaling by path_available will nullify the addition of inductive value in the case we find no path to goal (i.e. when no goal specified)
 
     return inductive_val
+
+def mcts_recurrent_fn(agent, rng_key, action, beliefs):
+    """mcts transition function which takes in current belief and action and output the next belief and efe reward and discount"""
+    @vmap
+    def compute_neg_efe(agent, qs, action):
+        qs_next_pi = compute_expected_state(qs, agent.B, action, B_dependencies=agent.B_dependencies)
+        qo_next_pi = compute_expected_obs(qs_next_pi, agent.A, agent.A_dependencies)
+        if agent.use_states_info_gain:
+            exp_info_gain = compute_info_gain(qs_next_pi, qo_next_pi, agent.A, agent.A_dependencies)
+        else:
+            exp_info_gain = 0.
+        
+        if agent.use_utility:
+            exp_utility = compute_expected_utility(qo_next_pi, agent.C)
+        else:
+            exp_utility = 0.
+
+        return exp_utility + exp_info_gain, qs_next_pi, qo_next_pi
+    
+    @partial(vmap, in_axes=(0, 0, None))
+    def get_prob_single_modality(o_m, po_m, onehot_obs):
+        """Compute observation likelihood for a single modality (observation and likelihood)"""
+        return jnp.inner(o_m, po_m) if onehot_obs else po_m[o_m]
+    
+    # compute immediate belief-action efe reward
+    multi_action = agent.policies[action, 0] # remove time dimension of policies
+    neg_efe, qs_next_pi, qo_next_pi = compute_neg_efe(agent, beliefs, multi_action)
+
+    # select observation sampling function based on whether agent uses onehot observation
+    choice = lambda key, po: jr.categorical(key, logits=jnp.log(po))
+    if agent.onehot_obs:
+        sample_obs_fn = lambda key, po, no: nn.one_hot(choice(key, po), no)
+    else:
+        sample_obs_fn = lambda key, po, no: choice(key, po)
+    
+    # set discount to outcome probabilities
+    discount = 1.
+    obs = []
+    for no_m, qo_m in zip(agent.num_obs, qo_next_pi):
+        rng_key, key = jr.split(rng_key)
+        o_m = sample_obs_fn(key, qo_m, no_m)
+        discount *= get_prob_single_modality(o_m, qo_m, agent.onehot_obs)
+        obs.append(jnp.expand_dims(o_m, 1))    
+    
+    """TODO: update infer_states to not expand along time dimension when needed"""
+    qs_next_posterior = agent.infer_states(obs, qs_next_pi)
+    qs_next_posterior = jtu.tree_map(lambda x: x.squeeze(1), qs_next_posterior) # remove time dimension
+    
+    recurrent_fn_output = mctx.RecurrentFnOutput(
+        reward=neg_efe,
+        discount=discount,
+        prior_logits=jnp.log(agent.E),
+        value=jnp.zeros_like(neg_efe)
+    )
+    return recurrent_fn_output, qs_next_posterior
+
+def update_posterior_policies_mcts(
+    agent,
+    qs_init,
+    max_depth=5,
+    num_simulations=10,
+    seed=0,
+):
+    def mcts_policy(rng_key, agent, beliefs):
+        root = mctx.RootFnOutput(
+            prior_logits=jnp.log(agent.E),
+            value=jnp.zeros((agent.batch_size)),
+            embedding=beliefs,
+        )
+
+        recurrent_fn = mcts_recurrent_fn
+
+        policy_output = mctx.gumbel_muzero_policy(
+            agent,
+            rng_key,
+            root,
+            recurrent_fn,
+            num_simulations=num_simulations,
+            max_num_considered_actions=len(agent.policies),
+            max_depth=max_depth
+        )
+
+        return policy_output.action_weights, policy_output
+    
+    rng_key = jr.PRNGKey(seed)
+    q_pi, policy_out = mcts_policy(rng_key, agent, qs_init)
+    G = policy_out.search_tree.children_values.mean(-2)
+    return q_pi, G
 
 # if __name__ == '__main__':
 
