@@ -340,8 +340,17 @@ class Agent(Module):
     #     )
 
     #     return output
-
-    @vmap
+    
+    """TODO: the qs dimensions are highly inconsistent, some have a time dim some don't"""
+    @partial(vmap, in_axes=(0, 0, 0))
+    def infer_empirical_prior(self, action, qs):
+        # return empirical_prior, and the history of posterior beliefs (filtering distributions) held about hidden states at times 1, 2 ... t
+        qs_last = jtu.tree_map(lambda x: x[-1], qs)
+        # this computation of the predictive prior is correct only for fully factorised Bs.
+        pred = control.compute_expected_state(qs_last, self.B, action, B_dependencies=self.B_dependencies)
+        return (pred, qs)
+    
+    # @vmap
     def infer_states(
         self,
         observations,
@@ -384,18 +393,35 @@ class Agent(Module):
                 o_vec[i] = m * o_vec[i] + (1 - m) * jnp.ones_like(o_vec[i]) / self.num_obs[i]
                 A[i] = m * A[i] + (1 - m) * jnp.ones_like(A[i]) / self.num_obs[i]
 
-        output = inference.update_posterior_states(
+        infer_states = partial(
+            inference.update_posterior_states,
+            A_dependencies=self.A_dependencies,
+            B_dependencies=self.B_dependencies,
+            num_iter=self.inference_algo_params["num_iter"],
+            method=self.inference_algo
+        )
+        
+        output = vmap(infer_states)(
             A,
             self.B,
             o_vec,
             past_actions,
             prior=empirical_prior,
-            qs_hist=qs_hist,
-            A_dependencies=self.A_dependencies,
-            B_dependencies=self.B_dependencies,
-            num_iter=self.inference_algo_params["num_iter"],
-            method=self.inference_algo,
+            qs_hist=qs_hist
         )
+
+        # output = inference.update_posterior_states(
+        #     A,
+        #     self.B,
+        #     o_vec,
+        #     past_actions,
+        #     prior=empirical_prior,
+        #     qs_hist=qs_hist,
+        #     A_dependencies=self.A_dependencies,
+        #     B_dependencies=self.B_dependencies,
+        #     num_iter=self.inference_algo_params["num_iter"],
+        #     method=self.inference_algo,
+        # )
 
         return output
     
@@ -451,7 +477,7 @@ class Agent(Module):
             Negative expected free energies of each policy, i.e. a vector containing one negative expected free energy per policy.
         """
         latest_belief = jtu.tree_map(
-            lambda x: x[-1], qs
+            lambda x: x[:, -1], qs
         )  # only get the posterior belief held at the current timepoint
         
         if self.control_algo == "vanilla":
@@ -506,14 +532,6 @@ class Agent(Module):
         #     self.E = maths.dirichlet_expected_value(self.qE)
 
         return agent
-
-    @partial(vmap, in_axes=(0, 0, 0))
-    def infer_empirical_prior(self, action, qs):
-        # return empirical_prior, and the history of posterior beliefs (filtering distributions) held about hidden states at times 1, 2 ... t
-        qs_last = jtu.tree_map(lambda x: x[-1], qs)
-        # this computation of the predictive prior is correct only for fully factorised Bs.
-        pred = control.compute_expected_state(qs_last, self.B, action, B_dependencies=self.B_dependencies)
-        return (pred, qs)
 
     @vmap
     def sample_action(self, q_pi: Array, rng_key=None):

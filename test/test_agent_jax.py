@@ -75,6 +75,15 @@ class TestAgentJax(unittest.TestCase):
         A = utils.random_A_matrix(num_obs, num_states, A_factor_list=A_factor_list)
         B = utils.random_B_matrix(num_states, num_controls, B_factor_list=B_factor_list, B_factor_control_list=B_factor_control_list)
         
+        # print("A shapes", [a.shape for a in A])
+
+        batch_size = 4
+        A = jtu.tree_map(lambda x: jnp.broadcast_to(x, (batch_size,) + x.shape), list(A))
+        B = jtu.tree_map(lambda x: jnp.broadcast_to(x, (batch_size,) + x.shape), list(B))
+
+        # print("A shapes", [a.shape for a in A])
+        # print("A normalized", [np.isclose(a.sum(1), 1.).all() for a in A])
+        
         agent = Agent(
             A, B, 
             A_dependencies=A_factor_list, 
@@ -82,12 +91,14 @@ class TestAgentJax(unittest.TestCase):
             B_action_dependencies=B_factor_control_list,
             num_controls=num_controls,
             sampling_mode="full",
+            apply_batch=False,
         )
 
         # dummy history
-        action = agent.policies[np.random.randint(0, len(agent.policies))]
-        observation = [np.random.randint(0, d, size=(1, 1)) for d in agent.num_obs]
-        qs_hist = jtu.tree_map(lambda x: jnp.expand_dims(x, 0), agent.D)
+        action = agent.policies[np.random.randint(0, len(agent.policies), size=(batch_size,))][:, 0]
+        observation = [np.random.randint(0, d, size=(batch_size, 1)) for d in agent.num_obs]
+        # qs_hist = jtu.tree_map(lambda x: jnp.expand_dims(x, 0), agent.D)
+        qs_hist = jtu.tree_map(lambda x: jnp.expand_dims(x, 1), agent.D)
 
         prior, _ = agent.infer_empirical_prior(action, qs_hist)
         # qs = agent.infer_states(observation, None, prior, None)
@@ -116,6 +127,10 @@ class TestAgentJax(unittest.TestCase):
         A = utils.random_A_matrix(num_obs, num_states, A_factor_list=A_factor_list)
         B = utils.random_B_matrix(num_states, num_controls, B_factor_list=B_factor_list, B_factor_control_list=B_factor_control_list)
         
+        batch_size = 4
+        A = jtu.tree_map(lambda x: jnp.broadcast_to(x, (batch_size,) + x.shape), list(A))
+        B = jtu.tree_map(lambda x: jnp.broadcast_to(x, (batch_size,) + x.shape), list(B))
+
         control_algo_params = CONTROL_ALGO_PARAMS["mcts"]
         agent = Agent(
             A, B, 
@@ -126,16 +141,22 @@ class TestAgentJax(unittest.TestCase):
             sampling_mode="full",
             control_algo="mcts",
             control_algo_params=control_algo_params,
+            apply_batch=False,
         )
 
         # dummy history
-        action = agent.policies[np.random.randint(0, len(agent.policies))]
-        observation = [np.random.randint(0, d, size=(1, 1)) for d in agent.num_obs]
-        qs_hist = jtu.tree_map(lambda x: jnp.expand_dims(x, 0), agent.D)
+        action = agent.policies[np.random.randint(0, len(agent.policies), size=(batch_size,))][:, 0]
+        observation = [np.random.randint(0, d, size=(batch_size, 1)) for d in agent.num_obs]
+        # qs_hist = jtu.tree_map(lambda x: jnp.expand_dims(x, 0), agent.D)
+        qs_hist = jtu.tree_map(lambda x: jnp.expand_dims(x, 1), agent.D)
 
         prior, _ = agent.infer_empirical_prior(action, qs_hist)
         # qs = agent.infer_states(observation, None, prior, None)
         qs = agent.infer_states(observation, prior)
+
+        print([a.shape for a in qs_hist])
+        print([a.shape for a in prior])
+        print([a.shape for a in qs])
 
         q_pi, G = agent.infer_policies(qs)
         action = agent.sample_action(q_pi)
