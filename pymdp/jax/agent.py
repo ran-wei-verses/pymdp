@@ -76,6 +76,7 @@ class Agent(Module):
     A_dependencies: Optional[List] = field(static=True)
     B_dependencies: Optional[List] = field(static=True)
     B_action_dependencies: Optional[List] = field(static=True)
+    is_mdp: Optional[bool] = field(static=True)
     # mapping from multi action dependencies to flat action dependencies for each B
     action_maps: List[dict] = field(static=True)
     batch_size: int = field(static=True)
@@ -200,6 +201,7 @@ class Agent(Module):
         self.num_controls = [B[f].shape[-1] for f in range(self.num_factors)]
 
         # static parameters
+        self.is_mdp = False
         self.inference_algo = inference_algo
         self.inference_algo_params = inference_algo_params
         self.control_algo = control_algo
@@ -380,6 +382,9 @@ class Agent(Module):
             ``qs[p_idx][t_idx][f_idx]`` refers to beliefs about marginal factor ``f_idx`` expected under policy ``p_idx``
             at timepoint ``t_idx``.
         """
+        if self.is_mdp:
+            output = [nn.one_hot(o, num_classes=self.num_obs[i], axis=-1) for i, o in enumerate(observations)]
+            return output
 
         # TODO: infer this from shapes
         if not self.onehot_obs:
@@ -701,6 +706,7 @@ class Agent(Module):
     #     return default_params
 
     def _validate(self):
+        is_mdp = True
         for m in range(self.num_modalities):
             factor_dims = tuple([self.num_states[f] for f in self.A_dependencies[m]])
             assert (
@@ -713,6 +719,9 @@ class Agent(Module):
             assert max(self.A_dependencies[m]) <= (
                 self.num_factors - 1
             ), f"Check modality {m} of `A_dependencies` - must be consistent with `num_states` and `num_factors`..."
+            
+            is_mdp = is_mdp and bool(jnp.isclose(self.A[m], jnp.eye(len(self.A[m][0])), atol=1e-4).all())
+        self.is_mdp = bool(is_mdp)
 
         for f in range(self.num_factors):
             factor_dims = tuple([self.num_states[f] for f in self.B_dependencies[f]])

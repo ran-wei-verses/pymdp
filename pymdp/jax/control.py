@@ -461,16 +461,44 @@ def calc_inductive_value_t(qs, qs_next, I, epsilon=1e-3):
 
     return inductive_val
 
+"""TODO: integrate MDP hacks"""
+def index_array(x, idx_arrays: tuple):
+    expanded_idx_arrays = [jnp.expand_dims(arr, axis=0) for arr in idx_arrays]
+    full_indexing_tuple = (slice(None),) + tuple(expanded_idx_arrays)
+    out = x[full_indexing_tuple].squeeze(1)
+    return out
+
+def compute_expected_state_mdp(qs_prior, B, u_t, B_dependencies=None): 
+    """
+    Compute next state distribution for mdp case
+    """
+    #Note: this algorithm is only correct if each factor depends only on itself. For any interactions, 
+    # we will have empirical priors with codependent factors. 
+    assert len(u_t) == len(B)  
+    qs_next = []
+    for B_f, u_f, deps in zip(B, u_t, B_dependencies):
+        relevant_factors = [qs_prior[idx] for idx in deps]
+        s_f = [q.argmax(-1) for q in relevant_factors]
+        idx = tuple(s_f + [u_f])
+        qs_next_f = index_array(B_f, idx)
+        qs_next.append(qs_next_f)
+    return qs_next
+
 def mcts_recurrent_fn(agent, rng_key, action, beliefs):
     """mcts transition function which takes in current belief and action and output the next belief and efe reward and discount"""
     @vmap
     def compute_neg_efe(agent, qs, action):
-        qs_next_pi = compute_expected_state(qs, agent.B, action, B_dependencies=agent.B_dependencies)
-        qo_next_pi = compute_expected_obs(qs_next_pi, agent.A, agent.A_dependencies)
-        if agent.use_states_info_gain:
-            exp_info_gain = compute_info_gain(qs_next_pi, qo_next_pi, agent.A, agent.A_dependencies)
-        else:
+        if agent.is_mdp:
+            qs_next_pi = compute_expected_state_mdp(qs, agent.B, action, B_dependencies=agent.B_dependencies)
+            qo_next_pi = qs_next_pi
             exp_info_gain = 0.
+        else:
+            qs_next_pi = compute_expected_state(qs, agent.B, action, B_dependencies=agent.B_dependencies)
+            qo_next_pi = compute_expected_obs(qs_next_pi, agent.A, agent.A_dependencies)
+            if agent.use_states_info_gain:
+                exp_info_gain = compute_info_gain(qs_next_pi, qo_next_pi, agent.A, agent.A_dependencies)
+            else:
+                exp_info_gain = 0.
         
         if agent.use_utility:
             exp_utility = compute_expected_utility(qo_next_pi, agent.C)
