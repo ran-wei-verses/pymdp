@@ -467,7 +467,7 @@ class Agent(Module):
 
         return q_pi, G
     
-    def infer_policies(self, qs: List):
+    def infer_policies(self, qs: List, seed=0):
         """
         Perform policy inference by optimizing a posterior (categorical) distribution over policies.
         This distribution is computed as the softmax of ``G * gamma + lnE`` where ``G`` is the negative expected
@@ -493,7 +493,7 @@ class Agent(Module):
                 latest_belief,
                 max_depth=self.control_algo_params["max_depth"], 
                 num_simulations=self.control_algo_params["num_simulations"], 
-                seed=self.control_algo_params["seed"], 
+                seed=seed,
             )
 
         return q_pi, G
@@ -538,8 +538,8 @@ class Agent(Module):
 
         return agent
 
-    @vmap
-    def sample_action(self, q_pi: Array, rng_key=None):
+    # @vmap
+    def sample_action(self, q_pi: Array, seed=0):
         """
         Sample or select a discrete action from the posterior over control states.
 
@@ -551,9 +551,10 @@ class Agent(Module):
             Array of action probabilities
         """
 
-        if (rng_key is None) and (self.action_selection == "stochastic"):
-            raise ValueError("Please provide a random number generator key to sample actions stochastically")
-
+        # if (rng_key is None) and (self.action_selection == "stochastic"):
+        #     raise ValueError("Please provide a random number generator key to sample actions stochastically")
+        
+        rng_key = random.PRNGKey(seed)
         if self.sampling_mode == "marginal":
             action = control.sample_action(
                 q_pi, self.policies, self.num_controls, self.action_selection, self.alpha, rng_key=rng_key
